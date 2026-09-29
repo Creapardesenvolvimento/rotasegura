@@ -14,7 +14,7 @@ import * as turf from '@turf/turf';
 
 import { Camera } from 'expo-camera';
 import { Audio } from 'expo-av';
-
+import * as FileSystem from 'expo-file-system';
 
 
 const LOCATION_TASK_NAME = 'background-location-task';
@@ -229,6 +229,38 @@ export default function App() {
       subscription.remove();
     };
   }, []);
+
+  useEffect(() => {
+    let intervalId: any;
+
+    if (isTracking) {
+      intervalId = setInterval(async () => {
+        try {
+          const payload = {
+            evento: "HEARTBEAT",
+            motorista: driverName,
+            status: "ativo",
+            timestamp: new Date().toISOString(),
+          };
+
+          await fetch(WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          console.log('Heartbeat sent:', payload);
+        } catch (err) {
+          console.error('Heartbeat error:', err);
+        }
+      }, 45000);
+    }
+
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [isTracking, driverName]);
 
   useEffect(() => {
     (async () => {
@@ -669,6 +701,8 @@ const styles = StyleSheet.create({
 let currentRouteLine: any = null;
 let globalDeviationTolerance = 150;
 let deviationCount = 0;
+let locationHistory: { latitude: number, longitude: number, timestamp: string }[] = [];
+let isRecording = false;
 const WEBHOOK_URL = 'https://webhook.site/test'; // Replace with real webhook URL
 
 TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
@@ -697,6 +731,15 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         return;
       }
 
+      locationHistory.push({
+        latitude,
+        longitude,
+        timestamp: new Date(timestamp || Date.now()).toISOString()
+      });
+      if (locationHistory.length > 5) {
+        locationHistory.shift();
+      }
+
       if (currentRouteLine) {
         // Calculate orthogonal distance using Turf
         const point = turf.point([longitude, latitude]);
@@ -712,29 +755,65 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
           deviationCount += 1;
 
           if (deviationCount >= 3) {
-            // Trigger webhook
-            const payload = {
-              evento: "DESVIO_ROTA",
-              motorista: "Luca",
-              distancia_desvio_metros: parseFloat(distanceMeters.toFixed(2)),
-              coordenadas: { latitude, longitude },
-              velocidade: (speed || 0) * 3.6, // m/s to km/h
-              timestamp: new Date(timestamp || Date.now()).toISOString()
-            };
+            if (!isRecording) {
+              isRecording = true;
+              (async () => {
+                try {
+                  await Audio.setAudioModeAsync({
+                    allowsRecordingIOS: true,
+                    playsInSilentModeIOS: true,
+                  });
 
-            try {
-              await fetch(WEBHOOK_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-              });
-              console.log('Webhook sent:', payload);
-            } catch (err) {
-              console.error('Webhook error:', err);
+                  const recording = new Audio.Recording();
+                  await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+                  await recording.startAsync();
+                  console.log('Started recording audio...');
+
+                  setTimeout(async () => {
+                    try {
+                      await recording.stopAndUnloadAsync();
+                      const uri = recording.getURI();
+                      console.log('Stopped recording audio', uri);
+
+                      let audioBase64 = null;
+                      if (uri) {
+                        audioBase64 = await FileSystem.readAsStringAsync(uri, {
+                          encoding: FileSystem.EncodingType.Base64,
+                        });
+                      }
+
+                      // Trigger webhook
+                      const payload = {
+                        evento: "DESVIO_ROTA",
+                        motorista: "Luca",
+                        distancia_desvio_metros: parseFloat(distanceMeters.toFixed(2)),
+                        coordenadas: { latitude, longitude },
+                        velocidade: (speed || 0) * 3.6, // m/s to km/h
+                        timestamp: new Date(timestamp || Date.now()).toISOString(),
+                        historico_localizacao: [...locationHistory],
+                        audio_base64: audioBase64
+                      };
+
+                      await fetch(WEBHOOK_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                      });
+                      console.log('Webhook sent:', payload);
+                    } catch (err) {
+                      console.error('Webhook or audio error:', err);
+                    } finally {
+                      isRecording = false;
+                      deviationCount = 0; // Reset counter after the event is handled
+                    }
+                  }, 20000);
+                } catch (err) {
+                  console.error('Failed to start recording', err);
+                  isRecording = false;
+                  deviationCount = 0;
+                }
+              })();
             }
-
-            // Reset counter to avoid spamming
-            deviationCount = 0;
           }
         } else {
           // Reset if we are back on track
