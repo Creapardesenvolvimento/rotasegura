@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 
 
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Alert, Linking, DeviceEventEmitter } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Alert, Linking, DeviceEventEmitter, Modal, TextInput, ActivityIndicator } from 'react-native';
 
 
 import { MaterialIcons, FontAwesome5 } from '@expo/vector-icons';
@@ -31,11 +31,127 @@ export default function App() {
 
   const [routeLine, setRouteLine] = useState<any>(null); // To store GeoJSON LineString
 
-  // Dummy origins for demo
-  const originLat = -23.550520;
-  const originLng = -46.633308;
-  const destLat = -23.561414;
-  const destLng = -46.656402;
+  const [isConfigModalVisible, setIsConfigModalVisible] = useState(false);
+  const [originInput, setOriginInput] = useState("");
+  const [destinationInput, setDestinationInput] = useState("");
+  const [waypoints, setWaypoints] = useState<string[]>([]);
+  const [deviationTolerance, setDeviationTolerance] = useState("150");
+  const [routeSummary, setRouteSummary] = useState<any>(null);
+  const [configuredRoute, setConfiguredRoute] = useState<any>(null);
+  const [isLoadingRoute, setIsLoadingRoute] = useState(false);
+
+  const geocode = async (address: string) => {
+    try {
+      const response = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`, {
+        headers: { 'User-Agent': 'RotaSegura/1.0' }
+      });
+      const data = await response.json();
+      if (data && data.length > 0) {
+        return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+      }
+    } catch (e) {
+      console.error("Geocoding error", e);
+    }
+    return null;
+  };
+
+  const handleUseCurrentLocation = async () => {
+    try {
+      let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setOriginInput(`${location.coords.latitude}, ${location.coords.longitude}`);
+    } catch (e) {
+      Alert.alert("Erro", "Não foi possível obter a localização atual.");
+    }
+  };
+
+  const handleAddWaypoint = () => {
+    setWaypoints([...waypoints, ""]);
+  };
+
+  const handleUpdateWaypoint = (text: string, index: number) => {
+    const newWaypoints = [...waypoints];
+    newWaypoints[index] = text;
+    setWaypoints(newWaypoints);
+  };
+
+  const handleTraceRoute = async () => {
+    if (!originInput || !destinationInput) {
+      Alert.alert("Erro", "Origem e Destino são obrigatórios.");
+      return;
+    }
+    setIsLoadingRoute(true);
+    setRouteSummary(null);
+
+    const originCoords = await geocode(originInput) || (originInput.includes(',') ? { lat: parseFloat(originInput.split(',')[0]), lon: parseFloat(originInput.split(',')[1]) } : null);
+    const destCoords = await geocode(destinationInput);
+
+    if (!originCoords || !destCoords) {
+      Alert.alert("Erro", "Não foi possível geocodificar a origem ou o destino.");
+      setIsLoadingRoute(false);
+      return;
+    }
+
+    let waypointsCoords = [];
+    for (let wp of waypoints) {
+      if (wp) {
+        const coords = await geocode(wp);
+        if (coords) waypointsCoords.push(coords);
+      }
+    }
+
+    const allCoords = [
+      `${originCoords.lon},${originCoords.lat}`,
+      ...waypointsCoords.map(wp => `${wp.lon},${wp.lat}`),
+      `${destCoords.lon},${destCoords.lat}`
+    ];
+
+    try {
+      const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${allCoords.join(';')}?geometries=geojson&overview=full&steps=true`);
+      const data = await response.json();
+      if (data.routes && data.routes.length > 0) {
+        const route = data.routes[0];
+        const distanceKm = (route.distance / 1000).toFixed(1);
+        const durationMin = Math.round(route.duration / 60);
+
+        let roads: string[] = [];
+        if (route.legs) {
+          route.legs.forEach((leg: any) => {
+            if (leg.steps) {
+              leg.steps.forEach((step: any) => {
+                if (step.name && !roads.includes(step.name)) roads.push(step.name);
+              });
+            }
+          });
+        }
+
+        setRouteSummary({
+          geometry: route.geometry,
+          distanceKm,
+          durationMin,
+          roads: roads.slice(0, 5),
+          originCoords,
+          destCoords,
+          originText: originInput,
+          destText: destinationInput
+        });
+      } else {
+        Alert.alert("Erro", "Nenhuma rota encontrada.");
+      }
+    } catch (e) {
+      console.error("OSRM error", e);
+      Alert.alert("Erro", "Falha ao buscar a rota.");
+    }
+    setIsLoadingRoute(false);
+  };
+
+  const handleConfirmRoute = () => {
+    if (routeSummary) {
+      setConfiguredRoute(routeSummary);
+      setRouteLine(routeSummary.geometry);
+      globalDeviationTolerance = parseFloat(deviationTolerance) || 150;
+      setIsConfigModalVisible(false);
+    }
+  };
 
   const handleStartRoute = async () => {
     if (isTracking) {
@@ -57,17 +173,13 @@ export default function App() {
 
     }
 
-    try {
-      // Fetch Route from OSRM
-      const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${originLng},${originLat};${destLng},${destLat}?geometries=geojson`);
-      const data = await response.json();
+    if (!configuredRoute) {
+      Alert.alert('Erro', 'Por favor, configure o trajeto antes de iniciar a rota.');
+      return;
+    }
 
-      if (data.routes && data.routes.length > 0) {
-        const route = data.routes[0].geometry; // GeoJSON LineString
-        setRouteLine(route);
-        currentRouteLine = route; // Set global for background task
-        console.log("Route fetched successfully.");
-      }
+    try {
+      currentRouteLine = configuredRoute.geometry; // Set global for background task
 
       // Start Tracking
       setIsTracking(true);
@@ -86,20 +198,21 @@ export default function App() {
 
 
       // Open Google Maps
-      const navUrl = `google.navigation:q=${destLat},${destLng}&mode=d`;
+      const { destCoords, originCoords } = configuredRoute;
+      const navUrl = `google.navigation:q=${destCoords.lat},${destCoords.lon}&mode=d`;
       const supported = await Linking.canOpenURL(navUrl);
 
       if (supported) {
         await Linking.openURL(navUrl);
       } else {
         // Fallback for iOS or if Google Maps not installed
-        const browserUrl = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLng}&destination=${destLat},${destLng}&travelmode=driving`;
+        const browserUrl = `https://www.google.com/maps/dir/?api=1&origin=${originCoords.lat},${originCoords.lon}&destination=${destCoords.lat},${destCoords.lon}&travelmode=driving`;
         await Linking.openURL(browserUrl);
       }
 
     } catch (error) {
-      console.error("Error fetching route or opening maps", error);
-      Alert.alert('Erro', 'Não foi possível buscar a rota ou abrir o mapa.');
+      console.error("Error opening maps", error);
+      Alert.alert('Erro', 'Não foi possível abrir o mapa.');
     }
   };
 
@@ -172,8 +285,11 @@ export default function App() {
           <Text style={styles.cardTitle}>Bom trabalho, {driverName}</Text>
           <View style={styles.driverInfoRow}>
             <FontAwesome5 name="car" size={16} color="#555" />
-            <Text style={styles.driverInfoText}>ABC1234 • Rota: 01000-000 -&gt; 02000-000</Text>
+            <Text style={styles.driverInfoText}>ABC1234 • Rota: {configuredRoute ? `${configuredRoute.originText} -> ${configuredRoute.destText}` : 'Não configurada'}</Text>
           </View>
+          <TouchableOpacity style={{marginTop: 10, alignSelf: 'flex-start'}} onPress={() => setIsConfigModalVisible(true)}>
+            <Text style={{color: '#00897B', fontWeight: 'bold'}}>+ Configurar Trajeto</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Card de Status de Conexão */}
@@ -223,8 +339,9 @@ export default function App() {
 
         {/* Botão de Ação */}
         <TouchableOpacity
-          style={[styles.mainButton, { backgroundColor: isTracking ? '#D32F2F' : '#00897B' }]}
+          style={[styles.mainButton, { backgroundColor: isTracking ? '#D32F2F' : (!configuredRoute ? '#B0BEC5' : '#00897B') }]}
           onPress={handleStartRoute}
+          disabled={!configuredRoute && !isTracking}
         >
           <MaterialIcons name={isTracking ? "stop" : "navigation"} size={24} color="#FFFFFF" />
           <Text style={styles.mainButtonText}>
@@ -233,6 +350,64 @@ export default function App() {
         </TouchableOpacity>
 
       </ScrollView>
+
+      <Modal visible={isConfigModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <ScrollView>
+              <Text style={styles.modalTitle}>Configurar Rota</Text>
+
+              <Text style={styles.inputLabel}>Origem</Text>
+              <View style={styles.inputRow}>
+                <TextInput style={styles.input} value={originInput} onChangeText={setOriginInput} placeholder="CEP ou Endereço" />
+                <TouchableOpacity onPress={handleUseCurrentLocation} style={styles.iconBtn}>
+                  <MaterialIcons name="my-location" size={20} color="#00897B" />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.inputLabel}>Destino</Text>
+              <TextInput style={styles.input} value={destinationInput} onChangeText={setDestinationInput} placeholder="CEP ou Endereço" />
+
+              {waypoints.map((wp, i) => (
+                <View key={i}>
+                  <Text style={styles.inputLabel}>Ponto de Parada {i + 1}</Text>
+                  <TextInput style={styles.input} value={wp} onChangeText={t => handleUpdateWaypoint(t, i)} placeholder="CEP ou Endereço" />
+                </View>
+              ))}
+
+              <TouchableOpacity style={styles.addWaypointBtn} onPress={handleAddWaypoint}>
+                <Text style={styles.addWaypointText}>+ Adicionar Ponto de Parada</Text>
+              </TouchableOpacity>
+
+              <Text style={styles.inputLabel}>Tolerância de Desvio (m)</Text>
+              <TextInput style={styles.input} value={deviationTolerance} onChangeText={setDeviationTolerance} keyboardType="numeric" />
+
+              <TouchableOpacity style={styles.actionBtn} onPress={handleTraceRoute} disabled={isLoadingRoute}>
+                {isLoadingRoute ? <ActivityIndicator color="#FFF" /> : <Text style={styles.actionBtnText}>Traçar Rota</Text>}
+              </TouchableOpacity>
+
+              {routeSummary && (
+                <View style={styles.summaryCard}>
+                  <Text style={styles.summaryTitle}>Resumo do Trajeto</Text>
+                  <Text>Distância: {routeSummary.distanceKm} km</Text>
+                  <Text>Tempo Estimado: {routeSummary.durationMin} min</Text>
+                  <Text style={{marginTop: 5, fontWeight: 'bold'}}>Vias Principais:</Text>
+                  {routeSummary.roads.map((r: string, i: number) => <Text key={i} style={{fontSize: 12}}>- {r}</Text>)}
+
+                  <TouchableOpacity style={[styles.actionBtn, {backgroundColor: '#4CAF50', marginTop: 15}]} onPress={handleConfirmRoute}>
+                    <Text style={styles.actionBtnText}>Confirmar e Salvar</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setIsConfigModalVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
     </View>
   );
 }
@@ -397,12 +572,102 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginLeft: 10,
   },
-
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '90%',
+    maxHeight: '80%',
+    backgroundColor: '#FFF',
+    borderRadius: 12,
+    padding: 20,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 15,
+    color: '#333',
+    textAlign: 'center',
+  },
+  inputLabel: {
+    fontSize: 14,
+    color: '#555',
+    marginBottom: 5,
+    marginTop: 10,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  input: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#CCC',
+    borderRadius: 8,
+    padding: 10,
+    fontSize: 16,
+    color: '#333',
+  },
+  iconBtn: {
+    padding: 10,
+    marginLeft: 10,
+    backgroundColor: '#E0F2F1',
+    borderRadius: 8,
+  },
+  addWaypointBtn: {
+    marginTop: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  addWaypointText: {
+    color: '#00897B',
+    fontWeight: 'bold',
+  },
+  actionBtn: {
+    backgroundColor: '#00897B',
+    padding: 15,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  actionBtnText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  cancelBtn: {
+    marginTop: 15,
+    padding: 15,
+    alignItems: 'center',
+  },
+  cancelBtnText: {
+    color: '#D32F2F',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  summaryCard: {
+    marginTop: 20,
+    padding: 15,
+    backgroundColor: '#F1F8E9',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#C5E1A5',
+  },
+  summaryTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#33691E',
+  },
 });
 
 
 // Global state for background task
 let currentRouteLine: any = null;
+let globalDeviationTolerance = 150;
 let deviationCount = 0;
 const WEBHOOK_URL = 'https://webhook.site/test'; // Replace with real webhook URL
 
@@ -443,7 +708,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
         console.log(`Distance to route: ${distanceMeters.toFixed(2)}m`);
 
-        if (distanceMeters > 150) {
+        if (distanceMeters > globalDeviationTolerance) {
           deviationCount += 1;
 
           if (deviationCount >= 3) {
