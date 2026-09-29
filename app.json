@@ -35,19 +35,21 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow RotaSegura to use your location."
+          "locationAlwaysAndWhenInUsePermission": "Permita que o RotaSegura monitore seu trajeto em segundo plano.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow RotaSegura to access your camera."
+          "cameraPermission": "Permita o uso da câmera para verificação de segurança."
         }
       ],
       [
         "expo-av",
         {
-          "microphonePermission": "Allow RotaSegura to access your microphone."
+          "microphonePermission": "Permita o uso do microfone para alertas de segurança."
         }
       ]
     ]
