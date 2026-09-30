@@ -1,3 +1,4 @@
+import ErrorBoundary from './ErrorBoundary';
 import React, { useState, useEffect } from 'react';
 
 
@@ -15,11 +16,11 @@ import * as turf from '@turf/turf';
 import { Camera } from 'expo-camera';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
+import { LOCATION_TASK_NAME, setTaskConfig, clearTaskConfig } from './LocationTask';
 
 
-const LOCATION_TASK_NAME = 'background-location-task';
 
-export default function App() {
+function AppMain() {
   const [driverName, setDriverName] = useState("Luca");
   const [isConnected, setIsConnected] = useState(false);
   const [lat, setLat] = useState("0.000000");
@@ -148,7 +149,7 @@ export default function App() {
     if (routeSummary) {
       setConfiguredRoute(routeSummary);
       setRouteLine(routeSummary.geometry);
-      globalDeviationTolerance = parseFloat(deviationTolerance) || 150;
+      setTaskConfig(routeSummary.geometry, parseFloat(deviationTolerance) || 150);
       setIsConfigModalVisible(false);
     }
   };
@@ -158,8 +159,8 @@ export default function App() {
 
       // Parar Rota
       setIsTracking(false);
-      currentRouteLine = null;
-      deviationCount = 0;
+      clearTaskConfig();
+
       try {
         const hasTask = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
         if (hasTask) {
@@ -173,13 +174,36 @@ export default function App() {
 
     }
 
+    try {
+      const { status: cameraStatus } = await Camera.requestCameraPermissionsAsync();
+      if (cameraStatus !== 'granted') {
+        Alert.alert('Aviso', 'O app precisa da câmera para algumas funcionalidades.');
+      }
+      const { status: audioStatus } = await Audio.requestPermissionsAsync();
+      if (audioStatus !== 'granted') {
+        Alert.alert('Aviso', 'O app precisa do microfone para algumas funcionalidades.');
+      }
+      const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
+      if (fgStatus !== 'granted') {
+        Alert.alert('Permissão necessária', 'O app precisa da localização para rastrear a rota.');
+        return;
+      }
+      const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
+      if (bgStatus !== 'granted') {
+        Alert.alert('Aviso', 'O app precisa da localização em segundo plano para rastrear a rota corretamente.');
+      }
+    } catch (error) {
+      console.error("Erro ao solicitar permissões", error);
+      Alert.alert('Erro', 'Ocorreu um erro ao solicitar as permissões necessárias.');
+      return;
+    }
+    setTaskConfig(configuredRoute?.geometry, parseFloat(deviationTolerance) || 150);
     if (!configuredRoute) {
       Alert.alert('Erro', 'Por favor, configure o trajeto antes de iniciar a rota.');
       return;
     }
 
     try {
-      currentRouteLine = configuredRoute.geometry; // Set global for background task
 
       // Start Tracking
       setIsTracking(true);
@@ -243,7 +267,7 @@ export default function App() {
             timestamp: new Date().toISOString(),
           };
 
-          await fetch(WEBHOOK_URL, {
+          await fetch('https://webhook.site/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -261,35 +285,6 @@ export default function App() {
       }
     };
   }, [isTracking, driverName]);
-
-  useEffect(() => {
-    (async () => {
-      // Camera
-      const { status: cameraStatus } = await Camera.requestCameraPermissionsAsync();
-      if (cameraStatus !== 'granted') {
-        Alert.alert('Permissão necessária', 'O app precisa da câmera para funcionar corretamente.');
-      }
-
-      // Audio
-      const { status: audioStatus } = await Audio.requestPermissionsAsync();
-      if (audioStatus !== 'granted') {
-        Alert.alert('Permissão necessária', 'O app precisa do microfone para funcionar corretamente.');
-      }
-
-      // Location Foreground
-      const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
-      if (fgStatus !== 'granted') {
-        Alert.alert('Permissão necessária', 'O app precisa da localização para rastrear a rota.');
-        return;
-      }
-
-      // Location Background
-      const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
-      if (bgStatus !== 'granted') {
-        Alert.alert('Permissão necessária', 'O app precisa da localização em segundo plano para rastrear a rota.');
-      }
-    })();
-  }, []);
 
 
 
@@ -697,129 +692,12 @@ const styles = StyleSheet.create({
 });
 
 
-// Global state for background task
-let currentRouteLine: any = null;
-let globalDeviationTolerance = 150;
-let deviationCount = 0;
-let locationHistory: { latitude: number, longitude: number, timestamp: string }[] = [];
-let isRecording = false;
-const WEBHOOK_URL = 'https://webhook.site/test'; // Replace with real webhook URL
-
-TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
-  if (error) {
-    console.error("Task Error:", error);
-    return;
-  }
-  if (data) {
-    const { locations } = data as any;
-    if (locations && locations.length > 0) {
-      const location = locations[0];
-      const { latitude, longitude, speed, accuracy, timestamp } = location.coords;
 
 
-      // Emit event to update UI
-      DeviceEventEmitter.emit('onLocationUpdate', {
-        latitude,
-        longitude,
-        speed,
-        accuracy
-      });
-
-
-      // Discard readings with accuracy > 25m
-      if (accuracy > 25) {
-        return;
-      }
-
-      locationHistory.push({
-        latitude,
-        longitude,
-        timestamp: new Date(timestamp || Date.now()).toISOString()
-      });
-      if (locationHistory.length > 5) {
-        locationHistory.shift();
-      }
-
-      if (currentRouteLine) {
-        // Calculate orthogonal distance using Turf
-        const point = turf.point([longitude, latitude]);
-        const line = turf.lineString(currentRouteLine.coordinates);
-
-        // pointToLineDistance returns distance in kilometers or degrees by default, we use kilometers and convert to meters
-        const distanceKm = turf.pointToLineDistance(point, line, { units: 'kilometers' });
-        const distanceMeters = distanceKm * 1000;
-
-        console.log(`Distance to route: ${distanceMeters.toFixed(2)}m`);
-
-        if (distanceMeters > globalDeviationTolerance) {
-          deviationCount += 1;
-
-          if (deviationCount >= 3) {
-            if (!isRecording) {
-              isRecording = true;
-              (async () => {
-                try {
-                  await Audio.setAudioModeAsync({
-                    allowsRecordingIOS: true,
-                    playsInSilentModeIOS: true,
-                  });
-
-                  const recording = new Audio.Recording();
-                  await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-                  await recording.startAsync();
-                  console.log('Started recording audio...');
-
-                  setTimeout(async () => {
-                    try {
-                      await recording.stopAndUnloadAsync();
-                      const uri = recording.getURI();
-                      console.log('Stopped recording audio', uri);
-
-                      let audioBase64 = null;
-                      if (uri) {
-                        audioBase64 = await FileSystem.readAsStringAsync(uri, {
-                          encoding: FileSystem.EncodingType.Base64,
-                        });
-                      }
-
-                      // Trigger webhook
-                      const payload = {
-                        evento: "DESVIO_ROTA",
-                        motorista: "Luca",
-                        distancia_desvio_metros: parseFloat(distanceMeters.toFixed(2)),
-                        coordenadas: { latitude, longitude },
-                        velocidade: (speed || 0) * 3.6, // m/s to km/h
-                        timestamp: new Date(timestamp || Date.now()).toISOString(),
-                        historico_localizacao: [...locationHistory],
-                        audio_base64: audioBase64
-                      };
-
-                      await fetch(WEBHOOK_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                      });
-                      console.log('Webhook sent:', payload);
-                    } catch (err) {
-                      console.error('Webhook or audio error:', err);
-                    } finally {
-                      isRecording = false;
-                      deviationCount = 0; // Reset counter after the event is handled
-                    }
-                  }, 20000);
-                } catch (err) {
-                  console.error('Failed to start recording', err);
-                  isRecording = false;
-                  deviationCount = 0;
-                }
-              })();
-            }
-          }
-        } else {
-          // Reset if we are back on track
-          deviationCount = 0;
-        }
-      }
-    }
-  }
-});
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppMain />
+    </ErrorBoundary>
+  );
+}

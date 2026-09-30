@@ -1,4 +1,5 @@
 import { registerRootComponent } from 'expo';
+import './LocationTask'; // Import task manager logic statically
 
 import App from './App';
 
